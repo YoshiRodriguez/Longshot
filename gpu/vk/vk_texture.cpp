@@ -16,7 +16,7 @@
 #endif
 #include <windows.h>
 #include <psapi.h>
-#if defined(__linux__)
+#if defined(__linux__) || defined(_WIN32)   // (_heapmin on Windows)
 #include <malloc.h>
 #endif
 #include <atomic>
@@ -3292,6 +3292,35 @@ void texture_frame(uint64_t completed) {
                              std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
                     }
                     busy = false;
+                });
+#endif
+#ifdef _WIN32
+            // Windows' side of the same: the heaps keep what the translation and the loads' decoding freed, committed, and a
+            // session's memory only went up (12 GB at the start, 20 GB of working set and 32 GB committed after an hour, on a 32 GB
+            // PC: Windows paged, the frame slowed). On a worker every 1800 presents, the C runtime's heap given back (_heapmin) and
+            // every heap of the process compacted (HeapCompact: its free blocks merged, the large ones' pages decommitted). Said
+            // when it gave back 32 MB or more, and every tenth time: RX_VK_HEAP_TRIM=0: never)
+            static std::atomic<bool> trimming{false};
+            static const bool heap_trim = !getenv("RX_VK_HEAP_TRIM") || getenv("RX_VK_HEAP_TRIM")[0] != '0';
+            if (heap_trim && frame_no % 1800 == 0 && !trimming.exchange(true))
+                jobs_push([] {
+                    static unsigned runs;
+                    PROCESS_MEMORY_COUNTERS_EX pm0{}, pm1{};
+                    pm0.cb = pm1.cb = sizeof pm0;
+                    K32GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS*)&pm0, sizeof pm0);
+                    const auto t0 = std::chrono::steady_clock::now();
+                    _heapmin();
+                    HANDLE heaps[64];
+                    const DWORD n = GetProcessHeaps(64, heaps);
+                    for (DWORD i = 0; i < n && i < 64; i++) HeapCompact(heaps[i], 0);
+                    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+                    K32GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS*)&pm1, sizeof pm1);
+                    const int64_t back = ((int64_t)pm0.PrivateUsage - (int64_t)pm1.PrivateUsage) >> 20;
+                    if (back >= 32 || runs++ % 10 == 0 || ms > 50)
+                        logf("vk: heap trim: %lu heaps, private %llu -> %llu MB, working set %llu -> %llu MB (%.1f ms)", (unsigned long)n,
+                             (unsigned long long)(pm0.PrivateUsage >> 20), (unsigned long long)(pm1.PrivateUsage >> 20),
+                             (unsigned long long)(pm0.WorkingSetSize >> 20), (unsigned long long)(pm1.WorkingSetSize >> 20), ms);
+                    trimming = false;
                 });
 #endif
         }
