@@ -5,6 +5,8 @@ from pathlib import Path
 import subprocess
 import tempfile
 
+RUN_ALL_ARGS = ["--cxx", "{cxx}", "--headers", "{vulkan_headers}"]
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -89,7 +91,7 @@ int main() {
                                                  "VkExtent3D extent(", "bool buffer_side("))
         fixture = (ROOT / "tests/vulkan_copy_span_gpu.cpp").read_text(encoding="utf-8").replace(
             "// PRODUCTION_COPY_LAYOUT", production)
-    with tempfile.TemporaryDirectory(prefix="hookshot-copy-span-") as directory:
+    with tempfile.TemporaryDirectory(prefix="longshot-copy-span-") as directory:
         cpp, exe = Path(directory) / "test.cpp", Path(directory) / "test.exe"
         cpp.write_text(fixture, encoding="utf-8")
         flags = ["-fsanitize=address,undefined", "-fno-sanitize-recover=all"] if args.sanitize else []

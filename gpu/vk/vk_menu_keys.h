@@ -1,4 +1,4 @@
-// (hookshot) Which gamepad buttons confirm and go back in the Insert menu: the ones the Switch's A and B are bound to (the
+// (longshot) Which gamepad buttons confirm and go back in the Insert menu: the ones the Switch's A and B are bound to (the
 // Controls page, the Layout preset), so the menu answers to A and B as the game does. With the Nintendo layout, the default,
 // A is the right face button and B the bottom one, as on a Switch; with Xbox / PC, A is the bottom one. A binding the menu
 // cannot use (none, or not a face button: the menu keeps the D-pad, Home and the shoulders) falls back to the bottom button
@@ -25,6 +25,15 @@ inline int dot(int position) {
     case kWest: return 2;
     default: return 3;
     }
+}
+
+/// (longshot) The button that pastes into a text field of the menu while it has the keyboard: the top face button, else the
+/// first of the left, the right and the bottom that neither confirms nor goes back
+inline int paste(int confirm, int back) {
+    const int order[4] = {kNorth, kWest, kEast, kSouth};
+    for (int i = 0; i < 4; i++)
+        if (order[i] != confirm && order[i] != back) return order[i];
+    return kNorth;
 }
 
 } // namespace mkwvk::menu_keys

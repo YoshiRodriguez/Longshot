@@ -3,6 +3,7 @@
    "Player". */
 #include "hos.h"
 #include "hos_paths.h"
+#include "hos_wide_size.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -50,7 +51,7 @@ static const char *desired_language(void) {
                 if ((unsigned char)p[0] == 0xEF && (unsigned char)p[1] == 0xBB && (unsigned char)p[2] == 0xBF) p += 3;   /* (a BOM: Notepad's UTF-8) */
                 while (*p == ' ' || *p == '\t') p++;
                 if (*p == '#' || *p == '\r' || *p == '\n' || !*p) continue;
-                /* (only a code the game has: a stray line was taken before, and the game stayed in English, Hookshot issue 75) */
+                /* (only a code the game has: a stray line was taken before, and the game stayed in English, Longshot issue 75) */
                 char code[32];
                 snprintf(code, sizeof code, "%s", p);
                 code[strcspn(code, " \t\r\n")] = 0;
@@ -87,54 +88,109 @@ HLE(_ZN2nn2oe18GetDesiredLanguageEv) {
    (MKW docked composes 3840 x 2160) */
 int hos_ini_option(const char *key, int otherwise);
 #define ini_option hos_ini_option
-int hos_ini_option(const char *key, int otherwise) {   /* (hookshot: the Insert menu's choice, gpu/vk/vk_menu.cpp; nn_vi.c reads it too) */
+/* (longshot) An option's text in longshot_options.ini, the game folder's (the Insert menu's choices, gpu/vk/vk_menu.cpp), the last
+   line that sets it, its line end cut: whether there was one */
+static int ini_text(const char *key, char *out, size_t size) {
     char path[MAX_PATH];
     const DWORD n = hos_game_path_a(path, MAX_PATH);
     char *slash = n ? (strrchr(path, 92) ? strrchr(path, 92) : strrchr(path, 47)) : NULL;   /* (linux: '/'; the game folder's, not bin\\'s) */
-    if (!slash) return otherwise;
-    snprintf(slash + 1, (size_t)(path + MAX_PATH - slash - 1), "hookshot_options.ini");
+    if (!slash || !size) return 0;
+    snprintf(slash + 1, (size_t)(path + MAX_PATH - slash - 1), "longshot_options.ini");
     FILE *f = fopen(path, "r");
-    if (!f) return otherwise;
+    if (!f) return 0;
     char line[80];
     const size_t len = strlen(key);
+    int found = 0;
     while (fgets(line, sizeof line, f))
-        if (!strncmp(line, key, len) && line[len] == '=') otherwise = atoi(line + len + 1);
+        if (!strncmp(line, key, len) && line[len] == '=') {
+            snprintf(out, size, "%s", line + len + 1);
+            out[strcspn(out, "\r\n")] = 0;
+            found = 1;
+        }
     fclose(f);
-    return otherwise;
+    return found;
+}
+int hos_ini_option(const char *key, int otherwise) {   /* (longshot: the Insert menu's choice, gpu/vk/vk_menu.cpp; nn_vi.c reads it too) */
+    char text[80];
+    return ini_text(key, text, sizeof text) ? atoi(text) : otherwise;
 }
 static int handheld(void) {
     static int v = -1;
     if (v < 0) v = getenv("HOS_HANDHELD") ? atoi(getenv("HOS_HANDHELD")) != 0 : ini_option("handheld_profile", 0) != 0;
     return v;
 }
-/* (hookshot) The Insert menu's Output resolution (output_res=, HOS_OUTPUT_RES over it), docked only: 0 the game's 2048 x 1152,
-   1 2560 x 1440, 2 3840 x 2160, 3 1920 x 1080, 4 5120 x 1440. The game's frame is its display size (2560 x 1440 as shipped;
-   nx2/oot_patches.py apply_output_size asks hos_output_size) times its graphics scale (GetCurrentGraphicsScale: 0 x1, 1 x0.8,
-   2 x0.667). Here it saw scale 1 (x0 left at the call before's answer), so 2048 x 1152; each explicit size uses x1. */
-static int output_mode(void) {
-    static int v = -1;
-    if (v < 0) {
-        static const char *const names[] = {"2048x1152 (the game's)", "2560x1440", "3840x2160", "1920x1080", "5120x1440"};
-        v = getenv("HOS_OUTPUT_RES") ? atoi(getenv("HOS_OUTPUT_RES")) : ini_option("output_res", 0);
-        if ((unsigned)v >= sizeof names / sizeof *names || handheld()) v = 0;
-        hos_log("oe: output resolution %s", names[v]);
+/* (longshot) The Insert menu's Output resolution (output_res=, HOS_OUTPUT_RES over it), docked only: a size, "<width>x<height>",
+   each side a multiple of 8 (rounded down to one), at least 640 x 360, at most 5120 x 2880's pixels (the largest the render
+   targets' pool, hos_rt_pool_size, was played at) and between 5:4 and 48:9 in shape (host/hos_main.c's screen shapes); anything
+   else is the game's own size, said in the log. The menu offers 2048x1152 and the screen's display modes (gpu/vk/display_modes.h;
+   where they are not known 1920x1080, 2560x1440, 3840x2160, 5120x1440 and 5120x2880), and any other size as its own choice. The numbers it saved before are read as their sizes: 0 the game's
+   2048 x 1152, 1 2560 x 1440, 2 3840 x 2160, 3 1920 x 1080, 4 5120 x 1440, 5 5120 x 2880. The game's frame is its display size
+   (2560 x 1440 as shipped; nx2/oot_patches.py apply_output_size asks hos_output_size) times its graphics scale
+   (GetCurrentGraphicsScale's tier: 0 x1, 1 x0.8, 2 x0.667). The tier is not the operation mode: the console's library maps
+   the system's graphics scaling parameter (10, 20, 30) to it, and 0 is the full picture. 2048x1152 asks for tier 1, the game's
+   own reduced size (what every run drew before, from x0 left at the call before's answer); each other size, and none chosen
+   (hos_output_default), uses tier 0. */
+int hos_output_parse(const char *text, uint32_t *w, uint32_t *h) {   /* (an explicit size: 1, and *w x *h; the game's own: 0) */
+    static const uint32_t old[][2] = {{0, 0}, {2560, 1440}, {3840, 2160}, {1920, 1080}, {5120, 1440}, {5120, 2880}};
+    unsigned a = 0, b = 0;
+    *w = *h = 0;
+    if (!text) return 0;
+    if (sscanf(text, "%u%*[xX]%u", &a, &b) == 2) {
+        a &= ~7u, b &= ~7u;
+        if (!hos_output_size_valid(a, b)) {
+            hos_log("oe: output_res=%s is not a size the game can use (640x360 to 5120x2880's pixels, 5:4 to 48:9): the game's own", text);
+            return 0;
+        }
+        if (a == 2048 && b == 1152) return 0;   /* (the game's own) */
+        *w = a, *h = b;
+        return 1;
     }
-    return v;
+    const int i = atoi(text);
+    if (i < 1 || i >= (int)(sizeof old / sizeof *old)) {
+        if (*text && strcmp(text, "0")) hos_log("oe: output_res=%s is not a size or one of the numbers saved before: the game's own", text);
+        return 0;
+    }
+    *w = old[i][0], *h = old[i][1];
+    return 1;
+}
+static uint32_t output_w, output_h;   /* (the explicit size; 0: the game's own) */
+static int output_mode(void) {   /* (an explicit size: 1; the game's own: 0) */
+    static int read;
+    if (!read) {
+        read = 1;
+        char text[80] = "";
+        const char *e = getenv("HOS_OUTPUT_RES");
+        const int chosen = e || ini_text("output_res", text, sizeof text);
+        if (!handheld() && chosen) hos_output_parse(e ? e : text, &output_w, &output_h);
+        /* (none chosen, a new install: the game's 2560 x 1440, or the screen's size where that has fewer pixels,
+           hos_output_default; the menu's first start saves the same. A 2048 x 1152 screen: the game's own reduced size, as
+           hos_output_parse reads what the menu saves for it. The window's thread made the window before the game's thread
+           starts: the screen is known) */
+        const int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
+        const int fresh = !handheld() && !chosen;
+        if (fresh) hos_output_default(sw > 0 ? (uint32_t)sw : 0, sh > 0 ? (uint32_t)sh : 0, &output_w, &output_h);
+        if (output_w == 2048 && output_h == 1152) output_w = output_h = 0;
+        if (output_w)
+            hos_log("oe: output resolution %ux%u%s", output_w, output_h,
+                    !fresh ? "" : output_w == 2560 && output_h == 1440 ? " (none chosen: the game's)"
+                                                                       : " (none chosen: the screen's, smaller than the game's 2560x1440)");
+        else hos_log("oe: output resolution 2048x1152 (the game's at graphics scale 1)");
+    }
+    return output_w != 0;
 }
 uint32_t hos_output_size(int height) {
-    switch (output_mode()) {
-    case 2: return height ? 2160 : 3840;
-    case 3: return height ? 1080 : 1920;
-    case 4: return height ? 1440 : 5120;
-    default: return height ? 1440 : 2560;
-    }
+    if (!output_mode()) return height ? 1440 : 2560;
+    return height ? output_h : output_w;
 }
-/* (hookshot) The render targets' GPU pool (nx2/oot_patches.py), 0x13100000 bytes as shipped, for 2560 x 1440: a 3840x2160 3D at
+/* (longshot) The render targets' GPU pool (nx2/oot_patches.py), 0x13100000 bytes as shipped, for 2560 x 1440: a 3840x2160 3D at
    the 4K output ran out of it. Scaled with the output's pixels, or the widescreen picture's when it has more (host/hos_main.c:
    hos_wide_out, the output's height at the screen's shape: 7680 x 2160 for a 32:9 screen at the 4K output, twice the pixels the pool
    was scaled for, and the game crashed as Kokiri Forest loaded, a null pointer or "texture handle ids -1", issue 1031);
    Castle Town's guard-house conversation/camera test crashed with 305 MB at 2560 x 1440 and passed with 512 MB.
-   Keep at least 512 MB by default; larger scaled pools and an explicit HOS_RT_POOL_MB=<MB> still win. */
+   Keep at least 512 MB by default; larger scaled pools and an explicit HOS_RT_POOL_MB=<MB> still win. An output with more pixels
+   than 3840 x 2160 (a size of the player's own, up to 5120 x 2880's pixels: hos_output_parse) keeps its pool to 900 MB:
+   5120 x 2880 scales to 1220 MB, and 1220 and 1000 MB both failed the game's own reservation at boot; at 900 MB it boots and
+   plays with the 3D at the full size. */
 uint64_t hos_rt_pool_size(uint64_t game) {
     const char *e = getenv("HOS_RT_POOL_MB");
     extern volatile uint64_t hos_wide_out;
@@ -142,8 +198,9 @@ uint64_t hos_rt_pool_size(uint64_t game) {
     uint64_t px = (uint64_t)hos_output_size(0) * hos_output_size(1);
     if (wide_px > px) px = wide_px;
     const uint64_t scaled = px > 2560 * 1440 ? (game * px / (2560 * 1440) + 0xfffff) & ~0xfffffULL : game;
-    const uint64_t minimum = 512ULL << 20;
-    const uint64_t v = e ? strtoull(e, NULL, 0) << 20 : scaled < minimum ? minimum : scaled;
+    const uint64_t minimum = 512ULL << 20, most = 900ULL << 20;
+    const int big = (uint64_t)hos_output_size(0) * hos_output_size(1) > 3840ULL * 2160;
+    const uint64_t v = e ? strtoull(e, NULL, 0) << 20 : scaled < minimum ? minimum : big && scaled > most ? most : scaled;
     static int logged;
     if (!logged++) hos_log("applet: render target pool %llu MB (the game's %llu MB)", (unsigned long long)(v >> 20), (unsigned long long)(game >> 20));
     return v;
@@ -211,11 +268,11 @@ static uint64_t now_posix(void) {
 HLE(_ZN2nn4time23StandardUserSystemClock14GetCurrentTimeEPNS0_9PosixTimeE) { G64(ARG(0)) = now_posix(); RET(0); }
 HLE(_ZN2nn4time26StandardNetworkSystemClock14GetCurrentTimeEPNS0_9PosixTimeE) { G64(ARG(0)) = now_posix(); RET(0); }
 /* StandardSteadyClock::now() -> time_point (std::chrono, rep int64, period seconds): one register, x0.
-   (hookshot) It was a 24-byte SteadyClockTimePoint written through x8; OoT reads x0 and leaves x8 unset (it was 0:
+   (longshot) It was a 24-byte SteadyClockTimePoint written through x8; OoT reads x0 and leaves x8 unset (it was 0:
    the write faulted at guest 0). MKW does not import it. */
 HLE(_ZN2nn4time19StandardSteadyClock3nowEv) { RET((uint64_t)(hos_now_ns() / 1000000000LL)); }
 
-/* (hookshot) nn::socket::detail::Poll(pollfd* fds, unsigned long n, int timeout_ms): offline, no descriptor is ever
+/* (longshot) nn::socket::detail::Poll(pollfd* fds, unsigned long n, int timeout_ms): offline, no descriptor is ever
    ready. OoT's gRPC poll engine (nn.npln.GrpcDispatcher) calls it through a function pointer, past the socket
    imports the runtime stubs, and the SDK's own Poll aborted on the uninitialized socket layer. It waits out the
    timeout (an infinite one in 50 ms steps, which the poll loop takes as a spurious wake) and reports a timeout. */
@@ -233,7 +290,7 @@ static void socket_poll(Ctx *c) {
 HLE(_ZN2nn6socket6detail4PollEP6pollfdmi) { socket_poll(c); }
 HLE(_ZN2nn6socket6detail4PollEPNS0_6PollFdEmi) { socket_poll(c); }
 
-/* (hookshot) nn::account::EnsureNetworkServiceAccountIdTokenCacheAsync(AsyncContext*, UserHandle const&): offline,
+/* (longshot) nn::account::EnsureNetworkServiceAccountIdTokenCacheAsync(AsyncContext*, UserHandle const&): offline,
    so no network service account. The generic stub's 0 said the task started, and OoT's npln worker (main
    0x8214eac0) then waited on the AsyncContext nothing had set up. This failure (account module 124, description
    280) takes the game's error branch right after the call. */
@@ -241,7 +298,7 @@ HLE(_ZN2nn7account44EnsureNetworkServiceAccountIdTokenCacheAsyncEPNS0_12AsyncCon
     RET(124 | (280 << 9));
 }
 
-/* (hookshot) nn::nsd::GetEnvironmentIdentifier(EnvironmentIdentifier* out): char[8]; retail units say "lp1".
+/* (longshot) nn::nsd::GetEnvironmentIdentifier(EnvironmentIdentifier* out): char[8]; retail units say "lp1".
    OoT (main 0x8243f490) only checks for a "t-" test prefix. Left to the SDK it asks the nsd service over HIPC. */
 HLE(_ZN2nn3nsd24GetEnvironmentIdentifierEPNS0_21EnvironmentIdentifierE) {
     if (ARG(0)) { memset(GP(ARG(0)), 0, 8); memcpy(GP(ARG(0)), "lp1", 3); }
@@ -249,7 +306,7 @@ HLE(_ZN2nn3nsd24GetEnvironmentIdentifierEPNS0_21EnvironmentIdentifierE) {
 
 static void calendar(uint64_t out, uint64_t info, int64_t posix, int local) {
     time_t t = (time_t)posix;
-    struct tm tmv = {0};   /* (hookshot: a time the C library cannot convert left it as the stack had it) */
+    struct tm tmv = {0};   /* (longshot: a time the C library cannot convert left it as the stack had it) */
     if (local) localtime_s(&tmv, &t); else gmtime_s(&tmv, &t);
     /* CalendarTime { s16 year; s8 month, day, hour, minute, second; pad } */
     uint8_t ct[8] = {0};
@@ -319,10 +376,10 @@ HLE(_ZN2nn3err9ShowErrorENS_6ResultE) { hos_log("err: the game shows error %#x (
    send it to the prepo service. Reports are dropped. ---------------------------------------------------------- */
 HLE(_ZN2nn5prepo10PlayReport4SaveEv) { RET(0); }
 HLE(_ZN2nn5prepo10PlayReport4SaveERKNS_7account3UidE) { RET(0); }
-/* (hookshot) PlayReport::Send(Uid const&), SDK 22's: kept nowhere, as Save. Left to the SDK it opened the prepo
+/* (longshot) PlayReport::Send(Uid const&), SDK 22's: kept nowhere, as Save. Left to the SDK it opened the prepo
    service through sm: and aborted on the empty reply (OoT's PlayReporter thread, ~5 minutes into a game). */
 HLE(_ZN2nn5prepo10PlayReport4SendERKNS_7account3UidE) { RET(0); }
-/* (hookshot) prepo::AsyncContext: the report "sent" at once. GetCompletionEvent(SystemEvent* out) gives an event
+/* (longshot) prepo::AsyncContext: the report "sent" at once. GetCompletionEvent(SystemEvent* out) gives an event
    already signaled (the SDK's own aborted on the context the empty IPC reply left), GetResult success. */
 void hos_system_event_init(uint64_t key, int autoclear);   /* nn_os_sync.c */
 void hos_system_event_signal(uint64_t key);
@@ -364,9 +421,9 @@ HLE(_ZN2nn7account26GetNetworkServiceAccountIdEPNS0_23NetworkServiceAccountIdERK
     G64(ARG(0)) = 0;
     RET(0x7C7C);
 }
-/* nn::oe::GetCurrentGraphicsScale() -> float (docked/handheld render scale): 1.0 */
+/* nn::oe::GetCurrentGraphicsScale() -> a tier in w0, which the game sizes its frame by (0 x1, 1 x0.8, 2 x0.667: hos_output_parse) */
 HLE(_ZN2nn2oe23GetCurrentGraphicsScaleEv) {
-    /* (hookshot) HOS_GRAPHICS_SCALE=<f>: another scale, a test of whether the game sizes its picture by it (4K, issue 68) */
+    /* (longshot) HOS_GRAPHICS_SCALE=<f>: another scale, a test of whether the game sizes its picture by it (4K, issue 68) */
     static float scale = 0;
     static volatile LONG told;
     if (scale == 0) scale = getenv("HOS_GRAPHICS_SCALE") ? (float)atof(getenv("HOS_GRAPHICS_SCALE")) : 1.0f;
@@ -376,7 +433,7 @@ HLE(_ZN2nn2oe23GetCurrentGraphicsScaleEv) {
     uint32_t bits;
     memcpy(&bits, &one, 4);
     c->vreg[0][0] = bits, c->vreg[0][1] = 0;
-    c->x[0] = output_mode() ? 0 : 1;   /* (the scale enum the game reads, w0: x1 for a chosen output, x0.8 as before) */
+    c->x[0] = output_mode() ? 0 : 1;   /* (the tier, w0: 0 for a size chosen or the default, 1 for 2048x1152 and the handheld profile) */
 }
 HLE(_ZN2nn2oe42SetGraphicsScaleChangedNotificationEnabledEb) {}
 HLE(_ZN2nn2oe31EnterExitRequestHandlingSectionEv) {}

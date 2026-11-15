@@ -7,9 +7,11 @@ from pathlib import Path
 import subprocess
 import tempfile
 
+RUN_ALL_ARGS = ["--cc", "gcc"]
+
 ROOT = Path(__file__).resolve().parents[1]
 CASES = ("failure", "launch", "long", "success", "warning", "pipe_fallback", "inherit_fallback", "null_fallback", "empty", "high_exit", "query",
-         "capture_error", "max_paths")
+         "capture_error", "max_paths", "missing", "missing_max_paths", "child_exit_2")
 
 
 def extract(source):
@@ -19,7 +21,7 @@ def extract(source):
     if marker.startswith("static RunResult"):
         start = source.rindex("typedef struct {", 0, start)
     call_start = source.index("            GetSystemDirectoryW(sys, MAX_PATH);")
-    call_end = source.index('            if (strcmp(p->from, "-")', call_start)
+    call_end = source.index('            {   /* (the tool\'s prefix folder, moved in as dest) */', call_start)
     return source[start:end], source[call_start:call_end]
 
 
@@ -36,7 +38,7 @@ def main():
     code = template.replace("/* ACTUAL_HELPER */", helper).replace("/* ACTUAL_CALL */", call)
     priority = {"creationflags": (getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0))}
     rows = []
-    with tempfile.TemporaryDirectory(prefix="hookshot-tar-diagnostics-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="longshot-tar-diagnostics-") as temporary:
         folder = Path(temporary)
         source, executable = folder / "fixture.c", folder / "fixture.exe"
         source.write_text(code, encoding="utf-8")
@@ -49,6 +51,8 @@ def main():
         if os.name == "nt":
             real = folder / "real-fixture.exe"
             subprocess.run([args.cc, *flags, "-DREAL_CHILD", str(source), "-o", str(real)], check=True, **priority)
+            result = subprocess.run([str(real), str(folder), "missing"], capture_output=True, text=True, timeout=15, **priority)
+            rows.append(dict(case="real_missing_executable", returncode=result.returncode, stdout=result.stdout, stderr=result.stderr))
             result = subprocess.run([str(real), str(folder)], capture_output=True, text=True, timeout=15, **priority)
             rows.append(dict(case="real_child_no_standard_handles", returncode=result.returncode, stdout=result.stdout, stderr=result.stderr))
     receipt = dict(source=str(args.source), source_sha256=hashlib.sha256(production.encode()).hexdigest(),

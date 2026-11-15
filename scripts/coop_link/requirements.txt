@@ -1,0 +1,2 @@
+# Longshot Co-op Link (scripts/coop_link/coop_link.py): WebRTC with free public STUN
+aiortc>=1.9

@@ -6,6 +6,8 @@ import shutil
 import subprocess
 import tempfile
 
+RUN_ALL_ARGS = ["--cxx", "{cxx}"]
+
 ROOT = Path(__file__).resolve().parents[1]
 CASES = ("unset", "empty", "zero", "negative", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "prefix",
          "malformed", "int_max", "positive_overflow", "negative_overflow")
@@ -42,7 +44,7 @@ def main():
     flags = subprocess.CREATE_NO_WINDOW | subprocess.BELOW_NORMAL_PRIORITY_CLASS if os.name == "nt" else 0
     env = dict(os.environ)
     env["PATH"] = str(Path(cxx).parent) + os.pathsep + env.get("PATH", "")
-    with tempfile.TemporaryDirectory(prefix="hookshot-frame-wait-") as folder:
+    with tempfile.TemporaryDirectory(prefix="longshot-frame-wait-") as folder:
         tmp = Path(folder)
         (tmp / "frame_wait_actual.inc").write_text(actual + "\n", encoding="utf-8")
         exe = tmp / ("frame_wait.exe" if os.name == "nt" else "frame_wait")

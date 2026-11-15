@@ -11,6 +11,8 @@ import subprocess
 import tempfile
 import unittest
 
+RUN_ALL_ARGS = ["--cxx", "{cxx}"]
+
 ROOT = Path(__file__).resolve().parents[1]
 COMPILER = None
 BASELINE = None
@@ -36,7 +38,7 @@ class PipelineCacheSaveTests(unittest.TestCase):
         compiler = COMPILER or shutil.which('clang++') or shutil.which('g++')
         if not compiler:
             raise AssertionError('a C++20 compiler is required')
-        cls.temporary = tempfile.TemporaryDirectory(prefix='hookshot-pipeline-save-')
+        cls.temporary = tempfile.TemporaryDirectory(prefix='longshot-pipeline-save-')
         cls.addClassCleanup(cls.temporary.cleanup)
         cls.directory = Path(cls.temporary.name).resolve()
         if not cls.directory.is_relative_to(Path(tempfile.gettempdir()).resolve()):
@@ -48,7 +50,9 @@ class PipelineCacheSaveTests(unittest.TestCase):
             (directory / 'pipeline_cache_save.inc').write_text(save_function(source), encoding='utf-8')
             executable = directory / 'check.exe'
             command = [compiler, '-std=c++20', '-O1', '-Wall', '-Wextra', '-Werror', '-pthread',
-                       '-I' + str(directory), str(ROOT / 'tests/pipeline_cache_save_test.cpp'), '-o', str(executable)]
+                       '-I' + str(directory), '-I' + str(ROOT / 'gpu/vk'), str(ROOT / 'tests/pipeline_cache_save_test.cpp'), '-o', str(executable)]
+            if name == 'original':
+                command += ['-DCACHE_VECTOR_BASELINE']
             if os.name == 'nt':
                 command += ['-D_CRT_SECURE_NO_WARNINGS']  # Match the production Windows CRT contract.
             options = {'creationflags': subprocess.BELOW_NORMAL_PRIORITY_CLASS} if os.name == 'nt' else {}
@@ -90,11 +94,35 @@ class PipelineCacheSaveTests(unittest.TestCase):
     def test_vulkan_empty_and_error_returns(self):
         self.check_case('api-results')
 
+    def test_actual_returned_size_controls_publication(self):
+        self.check_case("actual-size")
+
     def test_failed_write_preserves_existing_file(self):
         self.check_case('short-write')
 
     def test_forced_wait_preserves_existing_single_waiter_behavior(self):
         self.check_case('forced-wait')
+
+    def test_unchanged_data_is_not_written_again(self):
+        # The precompile's pipelines, all found in the cache, count towards a save: data of the size read or last written
+        # is not fetched nor written again; a write that did not land is tried again.
+        self.check_case('unchanged')
+        if BASELINE:
+            result = self.run_case('unchanged', original=True)
+            self.assertNotEqual(result.returncode, 0, 'the original rewrites unchanged data')
+            self.assertIn('FAIL line', result.stderr)
+
+    def test_in_play_the_cache_is_written_only_once_it_has_grown(self):
+        # With the play files, a save in play leaves the cache's own file alone for a little growth (an ask answered
+        # from the driver's own cache is copied into it); past 64 MB it is written, and a forced save (Restart now, the
+        # prepare) writes whatever changed once.
+        self.check_case('in-play')
+
+    def test_between_two_serial_builds_the_save_runs_there(self):
+        # Intel's compute builds are one at a time; a save put off for builds under way runs on that thread between two of
+        # them, at once, and is owed again when a background save is still going.
+        self.check_case('between')
+        self.check_case('between-busy')
 
     def check_case(self, case):
         result = self.run_case(case)

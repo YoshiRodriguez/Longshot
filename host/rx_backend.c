@@ -1,6 +1,6 @@
 /* Which renderer the rx_* calls go to (gpu/vk/vk_api.h): the WebGPU one in the executable (gpu/render, its
-   functions renamed wgr_* by rx_wgpu_names.h) or, with RX_BACKEND=vulkan, the Vulkan one in mkw_vk.dll beside the
-   executable. Decided at rx_start, before any other rx_* call; a DLL that is missing or finds no usable Vulkan
+   functions renamed wgr_* by rx_wgpu_names.h) or, unset or RX_BACKEND=vulkan, the Vulkan one in longshot_vk.dll
+   (longshot_vk.so) beside the executable. Decided at rx_start, before any other rx_* call; a DLL that is missing or finds no usable Vulkan
    device leaves the WebGPU renderer in place (logged). */
 #include "hos.h"
 #include <stdlib.h>
@@ -10,6 +10,7 @@
 
 #include "../gpu/vk/vk_api.h"
 #include "../gpu/vk/dlss_math.h"
+#include "control.h"
 
 /* the WebGPU renderer (gpu/render, renamed) */
 int wgr_start(void *hwnd);
@@ -59,6 +60,7 @@ const char *hos_mic_name(int index);
 void hos_mic_select(int mode, const char *name, int index);
 void hos_bind(int set, int button, int slot, int code);
 int hos_prompts_face(void);         /* prompts.c */
+int hos_prompts_live_parts(void);   /* prompts.c */
 #if defined(A64_WRITE_TRACK) && !defined(__EMSCRIPTEN__)
 void hos_mark_written(const void *p, size_t n);
 #endif
@@ -69,7 +71,21 @@ int hos_gpu_guest_ranges(uint64_t (*out)[2], int max);
 /* The soft write watch's marks (rt/a64.h A64_MARK, hos_mark_written) over the GPU-visible ranges, read and cleared:
    the Vulkan back end's own collection (gpu/render's rx_collect_written works only with the WebGPU renderer started).
    One consumer: with Vulkan the WebGPU renderer never runs. */
+/* (256 marks, none set? Read as 32 words in one pass the compiler makes four AVX2 loads of: most of the ranges hold no
+   mark at a submit, and at 32 marks a step the walk itself, not the memory, was what a scan cost) */
+static inline int marks_clear_256(const uint8_t *m) {
+    uint64_t w[32], any = 0;
+    memcpy(w, m, sizeof w);
+    for (int i = 0; i < 32; i++) any |= w[i];
+    return !any;
+}
 static int64_t collect_in(const uint64_t (*ranges)[2], int nranges, uint32_t **pages) {
+    /* (HOS_COLLECT_WIDE=0: 32 marks a step at most, as before; the pages found are the same either way) */
+    static int wide = -1;
+    if (wide < 0) {
+        const char *e = getenv("HOS_COLLECT_WIDE");
+        wide = !(e && e[0] == '0');
+    }
     size_t n = 0, cap = 4096;
     uint32_t *out = malloc(cap * sizeof *out);
     for (int r = 0; r < nranges; r++) {
@@ -77,6 +93,10 @@ static int64_t collect_in(const uint64_t (*ranges)[2], int nranges, uint32_t **p
         uint64_t p1 = (hi + 4095) >> 12;
         if (p1 > A64_DIRTY_PAGES) p1 = A64_DIRTY_PAGES;
         for (uint64_t p = lo >> 12; p < p1;) {
+            if (wide && !(p & 255) && p + 256 <= p1 && marks_clear_256(&a64_dirty[p])) {   /* (256 pages at a time while none is marked) */
+                p += 256;
+                continue;
+            }
             if (!(p & 31) && p + 32 <= p1) {   /* (32 pages at a time while none is marked) */
                 uint64_t w[4];
                 memcpy(w, &a64_dirty[p], 32);
@@ -139,6 +159,29 @@ static uint64_t host_guest_alloc(uint64_t size) {
 void hos_watch_guest_writes(const uint8_t *data, uint64_t size);   /* nvn_native.c */
 static void host_watch_guest_writes(uint64_t guest, uint64_t size) { hos_watch_guest_writes(hos_guest_base() + guest, size); }
 static float host_aspect_ratio(void) { return hos_aspect_ratio; }
+#ifndef _WIN32
+int hos_sdl_desktop_size(int *width, int *height);   /* hos_sdl.c */
+#endif
+/* (longshot) the main screen's size, as host/hos_main.c takes its shape (MkwVkHost.screen_size) */
+static int host_screen_size(int *width, int *height) {
+#ifdef _WIN32
+    const int w = GetSystemMetrics(SM_CXSCREEN), h = GetSystemMetrics(SM_CYSCREEN);
+    if (w <= 0 || h <= 0) return 0;
+    *width = w, *height = h;
+    return 1;
+#else
+    return hos_sdl_desktop_size(width, height);
+#endif
+}
+static float host_wide_menus(uint32_t keep_mask) {   /* (MkwVkHost.wide_menus) */
+    extern volatile uint32_t hos_wide_keep_mask;
+    extern volatile float hos_wide_margin;
+    static const char *forced;
+    static int looked;
+    if (!looked) looked = 1, forced = getenv("HOS_WIDE_KEEP");
+    hos_wide_keep_mask = forced ? (uint32_t)strtoul(forced, NULL, 16) : keep_mask;
+    return hos_wide_margin;
+}
 int hos_mouse_pointer(MkwVkPointer *out);   /* display.c, posix/display_sdl.c */
 int hos_sdl_gyro_status(void);   /* pad_sdl.c */
 extern const char *hos_romfs_dir;   /* nn_fs.c, set by hos_main.c */
@@ -158,6 +201,61 @@ int hos_vk_take_key_press(int key) {
 #define host_take_key_press NULL
 #endif
 
+/* (longshot) the FPS counter's Breakdown: this thread's sleeps so far (host/hos_thread.c) */
+extern _Thread_local int64_t hos_slept_ns[2];
+extern volatile int64_t hos_poll_slept_ns, hos_acquire_slept_ns;
+extern volatile int hos_fps_timing;
+static void host_fps_timing(int on) { __atomic_store_n(&hos_fps_timing, on != 0, __ATOMIC_RELAXED); }
+static void host_slept_ns(int64_t out[2]) {
+    out[0] = __atomic_load_n(&hos_poll_slept_ns, __ATOMIC_RELAXED);
+    out[1] = hos_slept_ns[1] + __atomic_load_n(&hos_acquire_slept_ns, __ATOMIC_RELAXED);
+}
+
+/* (longshot) typed text for the Insert menu's text fields (MkwVkHost.take_text): the window's thread puts each character and
+   editing key in (host/display.c WM_CHAR and WM_KEYDOWN, host/posix/display_sdl.c SDL's text input and key events), the menu
+   takes them out at its frames, in order. Nothing is kept while no field has the keyboard, and the window then takes no text
+   (SDL's text input stopped: no input method's window over the game) */
+void hos_display_paste(void);   /* display.c, posix/display_sdl.c: the clipboard's first line put in, on the window's thread */
+enum { TEXT_QUEUE = 256 };
+static SRWLOCK text_lock = SRWLOCK_INIT;
+static uint32_t text_queue[TEXT_QUEUE];
+static unsigned text_first, text_n;
+static volatile LONG text_focus;
+/* whether a field has the keyboard (the window's thread: whether to take text and editing keys) */
+int hos_text_focus(void) { return InterlockedCompareExchange(&text_focus, 0, 0); }
+/* a character typed (a Unicode code point) or HOS_TEXT_KEY | an editing key; dropped while no field has the keyboard, or when
+   the menu has not taken the last TEXT_QUEUE (it takes them at every frame) */
+void hos_text_put(uint32_t c) {
+    if (!hos_text_focus()) return;
+    AcquireSRWLockExclusive(&text_lock);
+    if (text_n < TEXT_QUEUE) text_queue[(text_first + text_n++) % TEXT_QUEUE] = c;
+    ReleaseSRWLockExclusive(&text_lock);
+}
+/* UTF-8 typed (SDL's text input) or pasted (first_line: up to its first line break), a character at a time; a broken
+   sequence is left out */
+void hos_text_put_utf8(const char *s, int first_line) {
+    while (s && *s) {
+        const unsigned char b = (unsigned char)*s++;
+        const int more = b < 0x80 ? 0 : (b & 0xe0) == 0xc0 ? 1 : (b & 0xf0) == 0xe0 ? 2 : (b & 0xf8) == 0xf0 ? 3 : -1;
+        uint32_t c = more == 0 ? b : more == 1 ? b & 0x1fu : more == 2 ? b & 0x0fu : b & 0x07u;
+        int got = 0;   /* (continuation bytes taken; the byte that broke a sequence is read again as a character's first) */
+        while (more > 0 && got < more && ((unsigned char)*s & 0xc0) == 0x80) c = c << 6 | ((unsigned char)*s++ & 0x3fu), got++;
+        if (more < 0 || got < more) continue;
+        if (first_line && (c == '\n' || c == '\r')) break;
+        hos_text_put(c);
+    }
+}
+static int host_take_text(int focus, uint32_t *out, int max) {
+    InterlockedExchange(&text_focus, focus != HOS_TEXT_OFF);
+    if (focus == HOS_TEXT_PASTE) hos_display_paste();
+    int n = 0;
+    AcquireSRWLockExclusive(&text_lock);
+    if (focus == HOS_TEXT_OFF) text_n = 0;
+    for (; n < max && text_n; n++, text_n--, text_first = (text_first + 1) % TEXT_QUEUE) out[n] = text_queue[text_first];
+    ReleaseSRWLockExclusive(&text_lock);
+    return n;
+}
+
 static const MkwVkHost vk_host = {
     MKWVK_API_VERSION, host_log, hos_guest_base, hos_guest_size, hos_gpu_ptr, nvn_gpu_guest, nvn_gpu_read,
     nvn_gpu_write, host_collect, host_free_pages, host_mark_written, hos_ticks, hos_now_ns, nvn_tex_layout,
@@ -165,7 +263,8 @@ static const MkwVkHost vk_host = {
     hos_gpu_maps_generation, nvn_vmap_generation, hos_reserved_cpus, host_collect_in, host_guest_alloc,
     host_watch_guest_writes, hos_pad_raw, hos_binding, hos_bind, host_aspect_ratio, host_take_key_press,
     hos_mouse_pointer, hos_mic_count, hos_mic_name, hos_mic_select, hos_sdl_gyro_status, hos_log_flush, hos_prompts_face,
-    host_romfs_dir,
+    host_romfs_dir, host_wide_menus, host_slept_ns, host_fps_timing, hos_prompts_live_parts, host_screen_size,
+    host_take_text,
 };
 
 static const MkwVkRenderer *vk;   /* the Vulkan back end, when it was chosen and started */
@@ -231,23 +330,42 @@ static void flush_early(void) {
     ReleaseSRWLockExclusive(&early_lock);
 }
 
-/* dll: mkw_vk.dll (our Vulkan back end) or mkw_eden.dll (Eden's renderer driven natively, gpu/eden): one export */
+/* dll: longshot_vk.dll (longshot_vk.so on Linux), the Vulkan back end: one export */
 static const MkwVkRenderer *load_vulkan(const char *dll) {
     char path[MAX_PATH];
     const DWORD n = GetModuleFileNameA(NULL, path, MAX_PATH);
     char *slash = n ? (strrchr(path, '\\') ? strrchr(path, '\\') : strrchr(path, '/')) : NULL;   /* (linux: '/') */
-    if (!slash) return NULL;
-    strcpy(slash + 1, dll);
+    if (!slash || (size_t)(slash + 1 - path) + strlen(dll) >= sizeof path) return NULL;   /* (a path near MAX_PATH) */
+    memcpy(slash + 1, dll, strlen(dll) + 1);
     HMODULE m = LoadLibraryA(path);
     if (!m) {
+#ifdef _WIN32
         hos_log("rx: RX_BACKEND=vulkan, but %s did not load (%lu): WebGPU", path, GetLastError());
+#else   /* (why, as dlerror() said: a missing file, a glibc too old, a wrong ELF class. The line names the file
+           LoadLibraryA opened, longshot_vk.so, and drops dlerror()'s leading "<that file>: ", so the path, home folder
+           included, is in it once. Linux has no WebGPU: wgr_start draws nothing) */
+        char *ext = strrchr(path, '.');
+        if (ext && !strcmp(ext, ".dll")) strcpy(ext, ".so");
+        const char *why = hos_load_error();
+        const size_t n_path = strlen(path);
+        if (!strncmp(why, path, n_path) && !strncmp(why + n_path, ": ", 2)) why += n_path + 2;
+        hos_log("rx: RX_BACKEND=vulkan, but %s did not load (%s): nothing is drawn", path, why);
+#endif
         return NULL;
     }
     vk_module = m;
     mkwvk_init_fn init = (mkwvk_init_fn)(void *)GetProcAddress(m, "mkwvk_init");
-    const MkwVkRenderer *r = init ? init(&vk_host) : NULL;
-    if (!r || r->version != MKWVK_API_VERSION) {
-        hos_log("rx: the Vulkan back end did not start: WebGPU");
+    if (!init) {
+        hos_log("rx: %s has no mkwvk_init: WebGPU", path);
+        return NULL;
+    }
+    const MkwVkRenderer *r = init(&vk_host);
+    if (!r) {
+        hos_log("rx: mkwvk_init returned NULL: WebGPU");
+        return NULL;
+    }
+    if (r->version != MKWVK_API_VERSION) {
+        hos_log("rx: mkwvk_init version mismatch (%u vs %u): WebGPU", r->version, MKWVK_API_VERSION);
         return NULL;
     }
     return r;
@@ -255,13 +373,12 @@ static const MkwVkRenderer *load_vulkan(const char *dll) {
 
 int rx_start(void *hwnd) {
     const char *b = getenv("RX_BACKEND");
-    const int eden = b && !_stricmp(b, "eden");
-    if (!b || !_stricmp(b, "vulkan") || eden) {   /* (hookshot: Vulkan unless told otherwise; a started game has no RX_BACKEND) */
-        const char *dll = eden ? "mkw_eden.dll" : "hookshot_vk.dll";
+    if (!b || !_stricmp(b, "vulkan")) {   /* (longshot: Vulkan unless told otherwise; a started game has no RX_BACKEND) */
+        const char *dll = "longshot_vk.dll";
         const MkwVkRenderer *r = load_vulkan(dll);
         if (r && r->start(hwnd)) {
             vk = r;
-            hos_log("rx: renderer: %s (%s)", eden ? "Eden's" : "Vulkan", dll);
+            hos_log("rx: renderer: Vulkan (%s)", dll);
             flush_early();
             return 1;
         }
@@ -271,15 +388,19 @@ int rx_start(void *hwnd) {
     flush_early();
     return ok;
 }
-/* (hookshot) hookshot --prepare-shaders: the Vulkan back end started with no window and no game, which prepares
+/* (longshot) longshot --prepare-shaders: the Vulkan back end started with no window and no game, which prepares
    every shader in its start (gpu/vk/vk_main.cpp started_up) and is then let go. 0 when there is no usable Vulkan */
 int rx_prepare_shaders(void) {
-    const MkwVkRenderer *r = load_vulkan("hookshot_vk.dll");
+    const MkwVkRenderer *r = load_vulkan("longshot_vk.dll");
     return r && r->start(NULL);
 }
-/* (hookshot) the window is being closed: a back end still preparing its shaders stops and keeps what it made first (a few
+/* (longshot) the window is being closed: a back end still preparing its shaders stops and keeps what it made first (a few
    seconds at most). One without the export (an older one) has nothing to keep */
 void rx_close_asked(void) {
+    /* (first, before anything that takes time: the player asked to quit, so however the process ends from here (a second
+       close of a window that stopped answering) the crash window says nothing; a crash still counts: host/hos_crash_dialog.h) */
+    void hos_crash_quit_asked(void);
+    hos_crash_quit_asked();
     if (!vk_module) return;
     void (*close_asked)(void) = (void (*)(void))(void *)GetProcAddress(vk_module, "mkwvk_close_asked");
     if (close_asked) close_asked();
@@ -310,28 +431,32 @@ void rx_nvn_present(const nvn_tex *t, const int crop[4]) {
     InterlockedIncrement(&presents);
     vk ? vk->nvn_present(t, crop) : wgr_nvn_present(t, crop);
 }
-/* (hookshot, nx2/oot_jitter.py) NVIDIA DLSS's camera jitter: this frame's sub-pixel offset of the scene's projection, in clip
+/* (longshot, nx2/oot_jitter.py) the temporal upscaler's camera jitter (NVIDIA DLSS, AMD FSR 4: gpu/vk/vk_temporal.cpp): this frame's sub-pixel offset of the scene's projection, in clip
    space (what P[0][2] and P[1][2] get), into out, for the projection matrix at guest address projection (row major, as the
-   game fills its views' uniform buffers from it); 0 when there is none: DLSS off (or a renderer without it: rx_option
+   game fills its views' uniform buffers from it); 0 when there is none: DLSS and FSR off (or a renderer without them: rx_option
    HOS_OPT_DLSS_JITTER_W and _H, the scene's size in pixels, are 0), or a projection that is not one of the picture's
    (gpu/vk/dlss_math.h dlss_jitter_clip: a shadow map's, the HUD's). The renderer reads the offset back from
-   the camera's uniform buffer (gpu/vk/vk_dlss.cpp), so this only has to pick sub-pixel offsets that cover a pixel evenly:
-   the Halton (2, 3) sequence, over as many frames as DLSS's scale wants (HOS_OPT_DLSS_JITTER_PHASES: gpu/vk/dlss_math.h
+   the camera's uniform buffer (gpu/vk/vk_temporal.cpp), so this only has to pick sub-pixel offsets that cover a pixel evenly:
+   the Halton (2, 3) sequence, over as many frames as the upscaler's scale wants (HOS_OPT_DLSS_JITTER_PHASES: gpu/vk/dlss_math.h
    dlss_jitter_phases, 8 for DLAA up to 64). */
 int hos_dlss_jitter_clip(uint64_t projection, float out[2]) {
+    static SRWLOCK lock = SRWLOCK_INIT;
     static LONG at = -1;
-    static float w, h;
-    static int phases;
+    static MkwVkJitter jitter;
+    MkwVkJitter sample;
+    AcquireSRWLockExclusive(&lock);
     const LONG frame = presents;
     if (frame != at) {   /* (asked once a frame: the renderer's lock is not taken for every view) */
         at = frame;
-        w = (float)rx_option(HOS_OPT_DLSS_JITTER_W, 0), h = (float)rx_option(HOS_OPT_DLSS_JITTER_H, 0);
-        phases = rx_option(HOS_OPT_DLSS_JITTER_PHASES, 16);
+        jitter = (MkwVkJitter){0};
+        if (vk && vk->jitter_sample) vk->jitter_sample(&jitter);
     }
+    sample = jitter;
+    ReleaseSRWLockExclusive(&lock);
     float p[16];
     memcpy(p, GP(projection), sizeof p);
     extern volatile float hos_wide_ratio;
-    return dlss_jitter_clip(p, hos_wide_ratio, (unsigned)frame, phases, w, h, out);
+    return dlss_jitter_clip(p, hos_wide_ratio, (unsigned)frame, (int)sample.phases, (float)sample.width, (float)sample.height, out);
 }
 static void forward(const early_call *c) {
     switch (c->kind) {
@@ -391,6 +516,9 @@ void rx_nvn_texture_created(const nvn_tex *t) {
     if (vk && vk->nvn_texture_created) vk->nvn_texture_created(t);
 }
 void rx_nvn_program_released(const nvn_prog *p) { vk ? vk->nvn_program_released(p) : wgr_nvn_program_released(p); }
+void rx_nvn_program_created(const nvn_prog *p) {
+    if (vk && vk->nvn_program_created) vk->nvn_program_created(p);
+}
 void rx_nvn_read_texels(const nvn_tex *t, unsigned level, unsigned layer0, const NVNcopyRegion *r, uint8_t *dst,
                         size_t row, size_t img) {
     vk ? vk->nvn_read_texels(t, level, layer0, r, dst, row, img) : wgr_nvn_read_texels(t, level, layer0, r, dst, row, img);
@@ -434,6 +562,36 @@ int rx_guest_imported(uint64_t lo, uint64_t hi) {
 /* (nvn_native.c: the CPU set an event's value) in order with the submits, for the GPU's waits on it */
 int rx_option(int id, int otherwise) { return vk && vk->option ? vk->option(id) : otherwise; }
 void rx_option_set(int id, int value) { if (vk && vk->option_set) vk->option_set(id, value); }
+/* (longshot) the control bridge (host/control.c): the Vulkan back end's, none with WebGPU (0) */
+int rx_control_frame_info(int64_t *presents, int64_t *draws, int *width, int *height) {
+    if (!vk || !vk->frame_info) return 0;
+    vk->frame_info(presents, draws, width, height);
+    return 1;
+}
+int rx_control_shot(const char *path, int64_t after, void (*done)(void *ctx, int64_t present, int ok), void *ctx) {
+    return vk && vk->shot ? vk->shot(path, after, done, ctx) : 0;
+}
+#define CTL_SAME(f) (sizeof ((HosControlSetting *)0)->f == sizeof ((MkwVkSetting *)0)->f)
+_Static_assert(CTL_SAME(key) && CTL_SAME(name) && CTL_SAME(text) && CTL_SAME(tab), "control.h and vk_api.h: one setting");
+static void control_setting_copy(HosControlSetting *to, const MkwVkSetting *from) {   /* (the same fields, field by field) */
+    memcpy(to->key, from->key, sizeof to->key), memcpy(to->name, from->name, sizeof to->name);
+    memcpy(to->text, from->text, sizeof to->text), memcpy(to->tab, from->tab, sizeof to->tab);
+    to->value = from->value, to->lo = from->lo, to->hi = from->hi, to->step = from->step;
+    to->restart = from->restart, to->fixed = from->fixed;
+}
+int rx_control_setting(int index, HosControlSetting *out) {
+    MkwVkSetting s;
+    if (!vk || !vk->setting || !vk->setting(index, &s)) return 0;
+    control_setting_copy(out, &s);
+    return 1;
+}
+int rx_control_setting_set(const char *key, int value, HosControlSetting *out) {
+    MkwVkSetting s;
+    memset(&s, 0, sizeof s);
+    const int r = vk && vk->setting_set ? vk->setting_set(key, value, &s) : 0;
+    if (r) control_setting_copy(out, &s);
+    return r;
+}
 void rx_nvn_event_signal(uint64_t gpu, uint32_t value) {
     if (vk && vk->nvn_event_signal) vk->nvn_event_signal(gpu, value);
 }

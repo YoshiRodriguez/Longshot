@@ -1,191 +1,74 @@
-# Versioning and releases
+# Versioning
 
-Hookshot follows [Semantic Versioning 2.0.0](https://semver.org/) and the conventions of
-[semantic-release](https://semantic-release.org/). The current version is **0.1.0**.
+Longshot follows [Semantic Versioning 2.0.0](https://semver.org/). Its first version is **v3.0.0**. Hookshot's versions
+(0.1.0 to 2.x, NotRexed/Hookshot) are Hookshot's history and are not Longshot versions. How a version is built, signed and
+published, and how the Longshot Launcher installs it, is in [releases.md](releases.md).
 
-The git tag is the only source of truth. No file carries a version that has to be edited for a release: the game reads
-the tag through `nx2/version.py`, and the builder and the AppImage are stamped from the same tag when they are
-packaged.
+## Versions and channels
 
-## The version number
-
-`MAJOR.MINOR.PATCH`, with an optional prerelease suffix: `0.1.0`, `0.2.0`, `0.2.0-rc.1`. A release is tagged
-`v0.1.0`: the `v` belongs to the tag, not to the version. Build metadata is not used in tags.
-
-One version covers the whole project: the game (`hookshot.exe` / `hookshot`), the Vulkan back end, the lift pipeline
-and its scripts, Hookshot Builder and the Linux AppImage. They are built from the same commit and released together,
-so they never carry different versions.
-
-The "public" surface the rules protect is the command line of `make_game.py` and the builder, the `RX_` and `HOS_`
-switches, the files a build writes into a game folder (`hookshot_options.ini`, `hookshot_env.txt`, `language.txt`,
-`hookshot_version.txt`), saves, and the format of `hookshot_log.txt`. The C sources and internal headers are not an
-API and may change in any release.
-
-## Commits decide the version
-
-Releases are computed from the commits on the release branch since the last tag, so commit subjects must be
-[Conventional Commits](https://www.conventionalcommits.org/):
-
-```
-type(scope): description
-type(scope)!: description        (a breaking change)
-```
-
-`scope` is optional. A `!` before the colon, or `BREAKING CHANGE:` / `BREAKING-CHANGE:` in the commit body, marks a
-breaking change. The description is written as an imperative ("Stop scanning...", "Fix the..."), because it becomes
-the changelog line.
-
-| Commit | Next version |
-|---|---|
-| any commit with `!` or `BREAKING CHANGE:` | major (`0.1.0` -> `1.0.0`) |
-| `feat` | minor (`0.1.0` -> `0.2.0`) |
-| `fix` | patch (`0.1.0` -> `0.1.1`) |
-| `perf` | patch |
-| `revert` | patch |
-| `docs`, `refactor`, `style`, `test`, `build`, `ci`, `chore` | no release |
-
-`git revert` writes `Revert "..."`, which is not a Conventional Commit: use `git revert --edit` and write the subject
-as `revert: ...`, or the revert makes no release.
-
-A release takes the highest bump among its commits. Merge commits are ignored, and a commit with `[skip release]` or
-`[release skip]` in its message is left out of the analysis. `chore(release): 0.2.0 [skip ci] [skip release]`, the
-commit the release itself makes, is not a release (the notes in its body can mention a breaking change).
-
-There is no manual version bump. If a change should not make a release, use one of the types in the last row; if it
-should, use `feat` or `fix`.
-
-## 0.x and 1.0.0
-
-semantic-release does not treat major version zero specially: a breaking change is a major bump even from `0.1.0`.
-This is deliberate. Its documentation says that SemVer's different rules for `0.x` are out of scope, and it recommends
-`1.0.0` as the first release.
-
-Hookshot starts at `0.1.0` anyway, because the first versioned release is not stable. That tag is made once by hand
-(see below); after it, the release workflow is the only thing that creates tags. Consequence: the first breaking change
-merged to `main` releases `1.0.0`, not `0.2.0`.
-
-`1.0.0` means the public surface above is considered stable. Until then, keep breaking changes on the `next` branch
-and release them there as `1.0.0-rc.N`, or accept that the release that carries one becomes `1.0.0`.
-
-## Branches and the release workflow
-
-| Branch | Purpose | Version |
+| Channel | Versions | Made by |
 |---|---|---|
-| `main` | stable releases | `vX.Y.Z` |
-| `next` | release candidates | `vX.Y.Z-rc.N` |
+| `stable` | `vX.Y.Z` | a tag `vX.Y.Z` pushed on a commit of `main` |
+| `rc` | `vX.Y.Z-rc.N`, and the stables: it offers the newest of both | a tag `vX.Y.Z-rc.N` on `main` (a stable moves it too) |
+| `nightly` | `nightly-<commits since the fork>-<8 hex of the commit>`, e.g. `nightly-412-1a2b3c4d` | every push to `main` |
 
-Every push to `main` or `next` runs the [Release workflow](../.github/workflows/release.yml). It:
+The `v` belongs to the tag, not to the version. Build metadata is not used. A nightly's count starts at the fork, the commit
+that renamed the project (`e2a4d45`), so it says how far Longshot is past it. A build from a checkout is named by
+`git describe --tags --long` (`v3.0.0-3-g1a2b3c4`) or `dev`: it is on no channel, and the launcher never offers it as an
+update.
 
-1. finds the last release tag and the commits since it;
-2. takes the highest bump in the table above;
-3. runs `scripts/changelog.py` to put the new entry at the top of `changelog.txt`;
-4. commits `changelog.txt` as `chore(release): <version> [skip ci] [skip release]`;
-5. tags the release commit. The tag starts the Linux AppImage and Windows builder workflows: the first to finish makes
-   the GitHub release, and each attaches its files (the AppImage; `HookshotBuilder.exe`, the setup, and
-   `hookshot-setup.txt`, with the new parts in the `builder-parts` release). `scripts/release_upload.sh` is shared by both.
+One version covers the game (`longshot.exe` / `longshot`), the Vulkan back end, the lift pipeline and its scripts, and the
+builders: they are built from the same commit and released together. The **Longshot Launcher is released apart**, from
+MagicBeanDev/LongshotLauncher, with its own numbers (from v1.0.0) on the same three channels.
 
-A merge with no releasable commit (only docs, chores, and so on) makes no release. A release is never edited by hand,
-never re-tagged and never deleted. Require the *Game-free source regressions* workflow on `main` and `next` (branch
-protection): the release then runs for a commit whose tests have passed.
+The order (the launcher's `Core/Versions.cs`): stables and release candidates in semver order (`v3.1.0-rc.1` <
+`v3.1.0-rc.2` < `v3.1.0`), nightlies by their count. A nightly and a stable are not ordered: the launcher never offers one
+as an update of the other, and a build stays on its channel unless the player picks another.
 
-The workflow pushes back to the repository, so it needs a token with `contents: write` that may bypass `main`'s branch
-protection. Use a `RELEASE_TOKEN` secret (a fine-grained personal access token) rather than the built-in
-`GITHUB_TOKEN`: a tag pushed with `GITHUB_TOKEN` does not start another workflow, and the Linux AppImage and Windows
-builder workflows publish the release from the tag. With only `GITHUB_TOKEN`, build both with `workflow_dispatch` and
-create the release by hand.
+The "public" surface the rules protect is the command line of `make_game.py` and the builders, the `RX_` and `HOS_`
+switches, the files a build writes into a game folder (`longshot_options.ini`, `longshot_env.txt`, `language.txt`,
+`longshot_version.txt`), saves, the release files' names, `SHA256SUMS` and `tools.lock`, `recomplauncher.json`, and the format of
+`longshot_log.txt`. The C sources and internal headers are not an API and may change in any release.
 
-## The first tag: 0.1.0
+## Choosing the next version
 
-semantic-release's first release is `1.0.0` when it finds no tag. To make `0.1.0` the first version, tag the merge
-commit that introduces this scheme once:
+There are no release pull requests: a maintainer pushes a tag, and CI does the rest
+([RELEASING.md](../RELEASING.md)). Pull requests are squash-merged and their titles are
+[Conventional Commits](https://www.conventionalcommits.org/) (`.forgejo/workflows/ci.yml`,
+[CONTRIBUTING.md](../CONTRIBUTING.md#pull-request-titles)), so the commits on `main` say what changed, and CI
+(`scripts/release.py check-tag`) refuses a tag lower than they call for:
 
-```sh
-git tag -a v0.1.0 -m "Hookshot 0.1.0"
-git push origin v0.1.0
-```
+| Since the last stable | The next version is at least |
+|---|---|
+| any `!` or `BREAKING CHANGE:` | the next major: `v4.0.0` after `v3.2.1` |
+| a `feat` | the next minor: `v3.3.0` |
+| only `fix`, `perf` and the rest | the next patch: `v3.2.2` |
 
-The Release workflow does nothing while no version tag exists, so the merge cannot release `1.0.0` first. The pushed
-tag starts the Linux AppImage workflow, which creates the `0.1.0` GitHub release with the AppImage attached; create the
-release by hand if you do not want to wait for it. The `0.1.0` entry in `changelog.txt` is written for that tag. After
-it, do not tag by hand.
-
-## Pre-releases
-
-A release candidate is released from `next` with the same commands. semantic-release numbers it `v0.2.0-rc.1`,
-`v0.2.0-rc.2`, and so on; the GitHub release is marked as a prerelease and never becomes "latest". A prerelease is not
-written to `changelog.txt`: Factorio's parser accepts only `major.minor.patch`, and two release candidates share a base
-version. Its notes are in the GitHub prerelease. Merge `next` into `main` to release the final `0.2.0`, whose entry
-lists every commit since the last stable tag.
-
-## Hotfixes
-
-Branch from the release tag, not from `main`, when a fix must not include `main`'s unreleased features:
-
-```sh
-git switch -c fix/crash v0.1.0
-```
-
-Commit with `fix: ...` and open a pull request to `main`. If `main` has no unreleased feature commits, the release is a
-patch. The project does not keep maintenance branches for older minor versions: only the newest release is supported.
+It also refuses a tag that is not on `main` or not above every release there is. Every stable is first a release
+candidate: `vX.Y.Z-rc.1`, then `-rc.2` and so on while fixes come in, then `vX.Y.Z` on the candidate that was good (the
+same commit). `python -I scripts/release.py next` prints the number and the notes before tagging.
 
 ## Where the version appears
 
 | Place | Where it comes from |
 |---|---|
-| git tag | semantic-release; the source of truth |
-| `changelog.txt` | `scripts/changelog.py` during the release |
-| `hookshot_log.txt` and the Insert menu | `nx2/version.py`: `HOOKSHOT_VERSION`, then `VERSION`/`version.txt`, then `git describe --tags --match "v[0-9]*"` |
-| `hookshot_version.txt` in a build | the `VERSION` file written when the tools are packaged (`nx2/make_game.py`) |
-| AppImage file name | `git describe --tags --match "v[0-9]*"` (`scripts/linux/appimage.sh`) |
-| `HookshotBuilder.exe` | the MSBuild `Version` passed at publish time (`dotnet publish -p:Version=<version>`, the Windows builder workflow); the `csproj`'s `0.1.0` is only the default for a local build |
+| the tag | the maintainer; the source of truth |
+| `longshot_log.txt` and the Insert menu | `nx2/version.py`: `LONGSHOT_VERSION`, then `VERSION`/`version.txt`, then `git describe --tags --match "v[0-9]*"` |
+| `longshot_version.txt` in a build | the `VERSION` file written when the tools are packaged (`nx2/make_game.py`) |
+| the Windows builder's `VERSION` | the release workflow's name for the version (`scripts/builder_package.py zip`) |
+| the release | its tag; the release page and its files are named after it (docs/releases.md) |
 
-`nx2/version.py` also appends a fingerprint of the source files, `(source 1a2b3c4d)`. It is not a version: it tells
-two builds of the same release apart, and it is the only identifier a build from a modified checkout has.
-
-`package.json` and `package-lock.json` (if present) are the release tooling's, not the project's: `package.json` keeps
-the placeholder `0.0.0-development` on purpose, and the tag remains the version. The game never reads them.
+`nx2/version.py` also appends a fingerprint of the source files, `(source 1a2b3c4d)`. It is not a version: it tells two
+builds of the same release apart, and it is the only identifier a build from a modified checkout has.
 
 ## The changelog
 
-`changelog.txt` follows [Factorio's changelog format](https://lua-api.factorio.com/latest/auxiliary/changelog-format.html).
-Newest first, with a 99-dash separator before each version:
-
-```
----------------------------------------------------------------------------------------------------
-Version: 0.1.0
-Date: 07. 11. 2026
-  Features:
-    - Something new.
-  Bugfixes:
-    - Something fixed.
-```
-
-The date is day. month. year (`07. 11. 2026`), as in Factorio's own changelog. Section names are indented two
-spaces, bullets four, there are no tabs or trailing spaces, and a section is omitted when it is empty. The version is
-always three numbers: a prerelease has no entry (see above).
-
-| Commit | Section |
-|---|---|
-| `feat` | Features |
-| `fix`, `revert` | Bugfixes |
-| `perf` | Optimizations |
-| `refactor` | Changes |
-| breaking change | Changes, as `Breaking: ...` |
-| `docs`, `style`, `test`, `build`, `ci`, `chore` | not listed |
-
-A stable release writes the entry. Do not renumber, reorder or rewrite a released entry; a correction is a new commit
-and a new release. The `0.1.0` entry was written by hand because the history before this scheme does not use
-Conventional Commits.
-
-## History
-
-Tags from before this scheme (`Release`, `amd`, `text-hotfix`, and so on) are snapshots of the old workflow. They stay
-in the repository for history but are not releases: the tooling matches only `v[0-9]*` tags. `v0.1.0` is the first
-versioned release.
+Longshot keeps no changelog file. Its changes are on each release's page, written by git-cliff (`cliff.toml`,
+`scripts/release.py notes`) when it is released; nothing is committed back to `main`. Hookshot's history up to the fork
+(its entries up to 2.2.0-rc.1) stays in [NotRexed/Hookshot](https://github.com/NotRexed/Hookshot)'s
+[`CHANGELOG.md`](https://github.com/NotRexed/Hookshot/blob/main/CHANGELOG.md).
 
 ## Rules
 
-- Do not edit a version number in a file, move a tag or reuse a version.
-- Do not tag a branch other than `main` (or `next` for a release candidate).
-- Do not release from a dirty working tree; the release commit contains `changelog.txt` and nothing else.
-- Do not put game files, keys, builds or anything made from a dump in a release.
+- Do not move or reuse a tag. A version's files never change: a fix is the next version.
+- Do not put game files, keys, builds or anything made from a dump in a release (CONTRIBUTING.md).

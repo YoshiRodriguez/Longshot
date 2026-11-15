@@ -6,6 +6,8 @@ import shutil
 import subprocess
 import tempfile
 
+RUN_ALL_ARGS = ["--cxx", "{cxx}"]
+
 ROOT = Path(__file__).resolve().parents[1]
 CASES = ("initial_allocation_failure", "payload_allocation_failure", "records_address_zero",
          "records_only_address_zero", "payload_address_zero", "records_only_success", "task_success",
@@ -49,7 +51,7 @@ def main():
     flags = subprocess.CREATE_NO_WINDOW | subprocess.BELOW_NORMAL_PRIORITY_CLASS if os.name == "nt" else 0
     env = dict(os.environ)
     env["PATH"] = str(Path(cxx).parent) + os.pathsep + env.get("PATH", "")
-    with tempfile.TemporaryDirectory(prefix="hookshot-fallback-init-") as folder:
+    with tempfile.TemporaryDirectory(prefix="longshot-fallback-init-") as folder:
         tmp = Path(folder)
         (tmp / "fallback_actual.inc").write_text(actual + "\n", encoding="utf-8")
         exe = tmp / ("fallback.exe" if os.name == "nt" else "fallback")
