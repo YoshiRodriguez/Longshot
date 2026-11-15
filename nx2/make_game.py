@@ -2547,6 +2547,13 @@ def main(a=None):
         copy_writable(icon, os.path.join(out, "longshot.png"))   # (a second build overwrites the first's)
     seed_pipelines(out)
     ship_state_list(out)
+    # (co-op, host/oot_coop.c and docs/coop.md: the flags a new file starts with, the other players' bodies and looks in
+    # mods/00-coop, and where "go to a player" can arrive in each map. None stops the build: without them co-op is not ready)
+    for step, without in (("coop_flags.py", "co-op is not ready in this game folder"),
+                          ("coop_bodies.py", "the other players are not drawn"),
+                          ("coop_starts.py", "go to a player reaches fewer maps")):
+        if run(PY + [os.path.join(HERE, step), out], check=False, output=sys.stderr):
+            print("co-op: %s did not finish: %s" % (step, without), flush=True)
     language = os.path.join(out, "language.txt")   # (the same text as host/nn_applet.c writes)
     with open(language, "w", encoding="utf-8", newline="\n") as f:
         f.write("# The game's language. Change the line below to one of the codes listed here, save, and start the game again.\n\n%s\n\n" % a.language)

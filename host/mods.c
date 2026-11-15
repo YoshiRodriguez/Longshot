@@ -207,6 +207,27 @@ int hos_mods_file(const char *rel, char *out, size_t cap) {
     return 1;
 }
 
+/* (co-op) the mod file (out) whose key (lower case, '/') starts with prefix and ends with suffix, 1 with one: what
+   co-op's bodies and looks ask for (hos_mods_has) */
+int hos_mods_find(const char *prefix, const char *suffix, char *out, size_t cap) {
+    const size_t pn = strlen(prefix), sn = strlen(suffix);
+    for (size_t i = 0; i < table_cap; i++) {
+        const char *k = table[i].key;
+        const size_t kn = k ? strlen(k) : 0;
+        if (k && !table[i].is_dir && kn >= pn + sn && !strncmp(k, prefix, pn) && !strcmp(k + kn - sn, suffix)) {
+            snprintf(out, cap, "%s", table[i].host);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* host/oot_coop.c: whether a loaded mod supplies a file with this RomFS key prefix/suffix. */
+int hos_mods_has(const char *prefix, const char *suffix) {
+    char path[MAX_PATH];
+    return hos_mods_find(prefix, suffix, path, sizeof path);
+}
+
 /* nn_fs.c, listing a RomFS folder: fn(arg, name, is_dir, size) for each mod entry directly in it that the game's own
    folder (base_dir, a host path; may not exist) does not have. Returns how many. */
 int hos_mods_dir_extras(const char *rel, const char *base_dir, void (*fn)(void *, const char *, int, uint64_t),

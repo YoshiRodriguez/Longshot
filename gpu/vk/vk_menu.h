@@ -1,5 +1,6 @@
 // The Insert menu (vk_menu.cpp): options that apply while the game runs, kept in longshot_options.ini beside the executable.
 #pragma once
+#include "oot_coop_opts.h"   // (HOS_OPT_COOP_*: the Network tab and host/oot_coop.c)
 #include "auto_settings.h"
 
 #include "vk_internal.h"
@@ -145,6 +146,7 @@ void menu_option_set(int id, int value);   // (from the game's side: 7 the mouse
 int menu_setting(int index, MkwVkSetting* out);   // (the control bridge, host/control.c: the rows with a value)
 int menu_setting_set(const char* key, int value, MkwVkSetting* out);
 int menu_heart_protection();
+int menu_coop_option(int id);   // (co-op: the Network tab, for co-op: what the host asks by a HOS_OPT_COOP_* id, oot_coop_opts.h)
 int menu_player_flight();
 int menu_free_camera();
 int menu_link_speed();   // (Movement speed in percent, 100 while the tools are off)

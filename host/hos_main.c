@@ -909,9 +909,14 @@ static struct {
     uint64_t result;          /* (and the event manager's answer to the request: 0 seen when the map did not change) */
 } teleport;
 
+/* (co-op) a map change to any map and StartPos, not only the table's: co-op's "go to a player" (hos_oot_travel_to). Asked
+   with the index one past the table's last; the strings are set just before and stay (the event reads them later). */
+#define OOT_TRAVEL_ANY ((unsigned)(sizeof oot_destinations / sizeof oot_destinations[0]))
+static char oot_travel_banc[80], oot_travel_start[96], oot_travel_boot[96];
+
 static int oot_teleport(Ctx *c, uint64_t actor, unsigned index) {
     teleport.why = "no such destination", teleport.banc = NULL;
-    if (index >= sizeof oot_destinations / sizeof oot_destinations[0]) return 0;
+    if (index > OOT_TRAVEL_ANY || (index == OOT_TRAVEL_ANY && !oot_travel_banc[0])) return 0;
     const int64_t now = hos_now_ns();
     if (teleport.requested_at && now - teleport.requested_at < 8000000000LL) {
         hos_log("cheats: teleport ignored, a request is still in progress");
@@ -938,10 +943,10 @@ static int oot_teleport(Ctx *c, uint64_t actor, unsigned index) {
         return 0;
     }
     if (!oot_gamedata_bool(c, 0xcea220d3u, &child)) hos_log("cheats: Sequence_IsChildhood not found, using child maps");
-    const OotDestination *d = &oot_destinations[index];
-    const char *banc = child ? d->child_banc : d->adult_banc;
-    const char *start = child ? d->child_start : d->adult_start;
-    const char *boot = child ? d->child_boot : d->adult_boot;
+    const OotDestination *d = index < OOT_TRAVEL_ANY ? &oot_destinations[index] : NULL;
+    const char *banc = d ? (child ? d->child_banc : d->adult_banc) : oot_travel_banc;
+    const char *start = d ? (child ? d->child_start : d->adult_start) : oot_travel_start;
+    const char *boot = d ? (child ? d->child_boot : d->adult_boot) : oot_travel_boot;
     if (!banc) {
         hos_log("cheats: teleport %u has no %s map", index, child ? "child" : "adult");
         teleport.why = child ? "this destination has no map for the child" : "this destination has no map for the adult";
@@ -1027,6 +1032,34 @@ static int oot_teleport(Ctx *c, uint64_t actor, unsigned index) {
     if (ok) teleport.banc = banc;
     else teleport.why = "the game's event request could not be built";
     return ok;   /* (sent; the request's own result is only logged) */
+}
+
+/* Co-op's "go to a player" who is on another map (host/oot_coop.c): the teleport above, by the map's own name.
+   1 asked, 0 not now, -1 no way in is listed for that map. */
+int hos_oot_travel(Ctx *c, uint64_t actor, const char *banc) {
+    for (unsigned i = 0; i < sizeof oot_destinations / sizeof oot_destinations[0]; i++) {
+        const OotDestination *d = &oot_destinations[i];
+        if ((d->child_banc && !strcmp(d->child_banc, banc)) || (d->adult_banc && !strcmp(d->adult_banc, banc)))
+            return oot_teleport(c, actor, i);
+    }
+    return -1;
+}
+
+/* (co-op) Co-op's "go to a player" into any map, at a StartPos chosen near the other player (host/oot_coop.c, from the list
+   nx2/coop_starts.py makes). The arrival event is the table's for a map it lists (some maps have their own), else the one
+   every map change can use, Dm_SY_BancChangeArrive. 1 asked, 0 not now. */
+int hos_oot_travel_to(Ctx *c, uint64_t actor, const char *banc, const char *start) {
+    if (!banc || !start || strlen(banc) >= sizeof oot_travel_banc || strlen(start) >= sizeof oot_travel_start) return 0;
+    const char *boot = "Dm_SY_BancChangeArrive";
+    for (unsigned i = 0; i < OOT_TRAVEL_ANY; i++) {
+        const OotDestination *d = &oot_destinations[i];
+        if (d->child_banc && !strcmp(d->child_banc, banc)) { boot = d->child_boot; break; }
+        if (d->adult_banc && !strcmp(d->adult_banc, banc)) { boot = d->adult_boot; break; }
+    }
+    snprintf(oot_travel_banc, sizeof oot_travel_banc, "%s", banc);
+    snprintf(oot_travel_start, sizeof oot_travel_start, "%s", start);
+    snprintf(oot_travel_boot, sizeof oot_travel_boot, "%s", boot);
+    return oot_teleport(c, actor, OOT_TRAVEL_ANY);
 }
 
 /* Writes a GameData bool directly: GameDataMgr+32 is the (hash, index) table (+44 its size), the bools are 24-byte
@@ -1547,6 +1580,7 @@ void hos_oot_lift_player(Ctx *c, uint64_t actor) {
     const uint64_t movement = components ? recomp_load64(c, components + 800) : 0;
     if (movement < HOS_HEAP_BASE + 0x1d50 || recomp_load64(c, movement + 24) != actor ||
         !hos_oot_is_player(c, movement - 0x1d50)) return;
+    { void oot_coop_player(Ctx *c, uint64_t actor); oot_coop_player(c, actor); }   /* host/oot_coop.c: where Link stands, for the others */
     if (!oot_event_playing(c)) hos_oot_opening(c, 3);   /* the opening has let Link go: later events keep their own skip */
 
     // Link can be updated by different guest workers on successive frames.
